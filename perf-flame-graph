@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+
+# Copyright (C) Kwanhur Huang
+
+
+OPTS=`getopt -o vht:p: --long verbose,dry-run,help,seconds:,pid:,flame-graph: -n 'parse-options' -- "$@"`
+
+if [ $? != 0 ]; then
+    echo "parse options failed."
+    exit 1
+fi
+
+eval set -- "$OPTS"
+
+SCRIPT_NAME="perf_flame_graph"
+VERBOSE=false
+HELP=false
+DRY_RUN=false
+SECONDS=5
+PID=0
+FLAME_GRAPH=/apps/svr/FlameGraph
+
+while true; do
+    case "$1" in
+        -v | --verbose ) VERBOSE=true; shift ;;
+        -h | --help )    HELP=true; shift ;;
+             --dry-run ) DRY_RUN=true; shift ;;
+        -t | --seconds ) SECONDS="$2"; shift 2 ;;
+        -p | --pid )     PID="$2"; shift 2 ;;
+             --flame-graph ) FLAME_GRAPH="$2"; shift 2 ;;
+        -- ) shift; break ;;
+        * ) break ;;
+    esac
+done
+
+HELP=$HELP
+if [ $HELP = true ]; then
+    echo "
+Description:
+    user perf record data then generate flame graph
+
+    it must run with root.
+    perf tool(/usr/bin/perf) must be exited.
+    flamegraph tool(https://github.com/brendangregg/FlameGraph)
+
+Usage:
+    $SCRIPT_NAME [optoins]
+
+Options:
+    -h <help>           Print this usage.
+    -p <pid>            Specify the process ID (comma separated list).
+    -t <seconds>        Specify the number of seconds for sampling, default: 5 seconds.
+    --flame_graph       Specify the FlameGraph absolute directory, default: /apps/svr/FlameGraph.
+    --dry-run           Try to test run environment.
+    -v <verbose>        Be more verbose (show run messages or errors, etc).
+
+Examples:
+    $SCRIPT_NAME -p 12345
+    $SCRIPT_NAME -t 10 -p 12345
+    $SCRIPT_NAME -t 10 -p 12345 --flame-graph=/apps/svr/FlameGraph
+
+"
+exit 0
+fi
+
+# check perf tool exist or not
+if [ ! -x "/usr/bin/perf" ]; then
+    echo "/usr/bin/perf tool not exist"
+    exit 1
+fi
+
+#check flamegraph tool exist or not
+if [ ! -d "$FLAME_GRAPH" ]; then
+     echo "$FLAME_GRAPH not exist,please download it from github(https://github.com/brendangregg/FlameGraph) first"
+     exit 1
+fi
+if [ ! -x "$FLAME_GRAPH/stackcollapse-perf.pl" ]; then
+     echo "$FLAME_GRAPH/stackcollapse-perf.pl not exist!!"
+     exit 1
+fi
+if [ ! -x "$FLAME_GRAPH/flamegraph.pl" ]; then
+     echo "$FLAME_GRAPH/flamegraph.pl not exist!!"
+     exit 1
+fi
+
+# check current user is root or not
+if [ "$USER" != "root" ]; then
+    echo "please run with root";
+    exit 1;
+fi
+
+if [ $DRY_RUN = true ]; then
+    exit 1;
+fi
+
+function log
+{
+    if [ $VERBOSE = true ]; then
+        echo "$1"
+    fi
+}
+
+log "start to perf record all cpu core"
+
+PERF_DATA=/tmp/perf-$PID.data
+PERF_UNFOLD=/tmp/perf-$PID.unfold
+PERF_FOLDED=/tmp/perf-$PID.folded
+PERF_SVG=/tmp/perf-$PID.svg
+
+cat /dev/null > $PERF_DATA
+
+#record samples
+perf record -a -g -p $PID -o $PERF_DATA &
+
+PERF_PID=`ps aux|grep "perf record"|grep -v grep|awk '{print $2}'`
+
+log "perf record pid:$PERF_PID"
+
+if [ -n "$PERF_PID" ]; then
+    log "sleep $SECONDS seconds"
+    sleep $SECONDS
+    log "kill perf record process"
+    kill -s INT $PERF_PID
+fi
+
+#wait for perf exit
+sleep 1
+
+log "perf script $PERF_DATA to $PERF_UNFOLD"
+perf script -i $PERF_DATA  > $PERF_UNFOLD
+rm -f $PERF_DATA
+
+log "stackcollapse-perf.pl convert $PERF_UNFOLD to $PERF_FOLDED"
+$FLAME_GRAPH/stackcollapse-perf.pl $PERF_UNFOLD  > $PERF_FOLDED
+rm -f $PERF_UNFOLD
+
+log "flamegraph.pl convert $PERF_FOLDED to $PERF_SVG"
+$FLAME_GRAPH/flamegraph.pl $PERF_FOLDED > $PERF_SVG
+rm -f $PERF_FOLDED
+
+echo "please download $PERF_SVG and use browser to open it"
